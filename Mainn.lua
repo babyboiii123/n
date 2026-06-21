@@ -38,11 +38,26 @@ end
 local Theme = MatchaUI.Theme
 
 local function normalizeKey(value)
+	if value == nil then
+		return ""
+	end
+
+	local valueType = typeOf(value)
+	if valueType ~= "string" and valueType ~= "number" then
+		local ok, name = pcall(function()
+			return value.Name
+		end)
+		if ok and name then
+			value = name
+		end
+	end
+
 	local text = tostring(value or "")
 	text = text:gsub("Enum%.KeyCode%.", "")
 	text = text:gsub("Enum%.UserInputType%.", "")
 	text = text:gsub("KeyCode%.", "")
 	text = text:gsub("UserInputType%.", "")
+	text = text:gsub("%s+", "")
 	return string.lower(text)
 end
 
@@ -295,12 +310,15 @@ function Root.new(options)
 	self._widgets = {}
 	self._sections = {}
 	self._keybinds = {}
+	self._activeSection = nil
 	self._dirty = true
 	self._height = 0
 	self._hovered = nil
 	self._pressed = nil
 	self._pressedControl = nil
 	self._hoveredControl = nil
+	self._hoveredTab = nil
+	self._pressedTab = nil
 	self._draggingSlider = nil
 	self._draggingWindow = false
 	self._dragOffset = Vector2.new(0, 0)
@@ -445,6 +463,10 @@ function Root:_keyName(input)
 	if keyCode and tostring(keyCode) ~= "Enum.KeyCode.Unknown" then
 		return normalizeKey(keyCode)
 	end
+	local key = normalizeKey(input.Key or input.KeyName or input.Name)
+	if key ~= "" then
+		return key
+	end
 	return normalizeKey(input.UserInputType)
 end
 
@@ -478,6 +500,26 @@ function Root:_hitControl(point)
 	return nil
 end
 
+function Root:_hitTab(point)
+	if self.Minimized then
+		return nil
+	end
+	for index = #self._sections, 1, -1 do
+		local section = self._sections[index]
+		local b = section._tabBounds
+		if section.Visible ~= false
+			and b
+			and point.X >= b.X
+			and point.Y >= b.Y
+			and point.X <= b.X + b.W
+			and point.Y <= b.Y + b.H
+		then
+			return section
+		end
+	end
+	return nil
+end
+
 function Root:_paintControl(control, state)
 	if not control then
 		return
@@ -489,6 +531,23 @@ function Root:_paintControl(control, state)
 		color = self.Theme.Pressed
 	end
 	Backend.color(control.BG, color)
+end
+
+function Root:_paintTab(section, state)
+	if not section then
+		return
+	end
+	local color = self.Theme.Panel2
+	local textColor = self.Theme.Muted
+	if section == self._activeSection then
+		color = self.Theme.Accent
+		textColor = self.Theme.Text
+	elseif state == "hover" then
+		color = self.Theme.Hover
+		textColor = self.Theme.Text
+	end
+	Backend.color(section._tabBg, color)
+	Backend.color(section._tabLabel, textColor)
 end
 
 function Root:_startInputLoop()
@@ -534,6 +593,22 @@ function Root:_tickInput()
 		if self._hovered and self._hovered._hover then
 			self._hovered:_hover(false)
 		end
+		self:_paintTab(self._hoveredTab, "idle")
+		self._hoveredTab = nil
+		self._hovered = nil
+		return
+	end
+
+	local tab = self:_hitTab(point)
+	if tab ~= self._hoveredTab then
+		self:_paintTab(self._hoveredTab, "idle")
+		self._hoveredTab = tab
+		self:_paintTab(tab, "hover")
+	end
+	if tab then
+		if self._hovered and self._hovered._hover then
+			self._hovered:_hover(false)
+		end
 		self._hovered = nil
 		return
 	end
@@ -553,7 +628,11 @@ end
 function Root:_hitTest(point)
 	for index = #self._widgets, 1, -1 do
 		local widget = self._widgets[index]
-		if widget._interactive and widget.Visible ~= false then
+		if widget._interactive
+			and widget.Visible ~= false
+			and widget.Section == self._activeSection
+			and not self.Minimized
+		then
 			local bounds = widget._bounds
 			if bounds
 				and point.X >= bounds.X
@@ -583,6 +662,15 @@ function Root:_inputBegan(input)
 	if control then
 		self._pressedControl = control
 		self:_paintControl(control, "pressed")
+		return
+	end
+	local tab = self:_hitTab(point)
+	if tab then
+		self._pressedTab = tab
+		self._activeSection = tab
+		self:_paintTab(tab, "hover")
+		self._dirty = true
+		self:Layout()
 		return
 	end
 	if self:_inTitle(point) then
@@ -622,6 +710,22 @@ function Root:_inputChanged(input)
 			if self._hovered and self._hovered._hover then
 				self._hovered:_hover(false)
 			end
+			self:_paintTab(self._hoveredTab, "idle")
+			self._hoveredTab = nil
+			self._hovered = nil
+			return
+		end
+
+		local tab = self:_hitTab(point)
+		if tab ~= self._hoveredTab then
+			self:_paintTab(self._hoveredTab, "idle")
+			self._hoveredTab = tab
+			self:_paintTab(tab, "hover")
+		end
+		if tab then
+			if self._hovered and self._hovered._hover then
+				self._hovered:_hover(false)
+			end
 			self._hovered = nil
 			return
 		end
@@ -646,8 +750,10 @@ function Root:_inputEnded(input)
 	local point = self:_mousePosition(input)
 	local pressed = self._pressed
 	local pressedControl = self._pressedControl
+	local pressedTab = self._pressedTab
 	self._pressed = nil
 	self._pressedControl = nil
+	self._pressedTab = nil
 	self._draggingSlider = nil
 	self._draggingWindow = false
 	if pressedControl then
@@ -656,6 +762,10 @@ function Root:_inputEnded(input)
 		if overControl and pressedControl.Callback then
 			pressedControl.Callback()
 		end
+		return
+	end
+	if pressedTab then
+		self:_paintTab(pressedTab, self._hoveredTab == pressedTab and "hover" or "idle")
 		return
 	end
 	if pressed and pressed._release then
@@ -675,11 +785,20 @@ function Root:Section(title)
 		Title = title or "Section",
 		Widgets = {},
 		Visible = true,
-		_header = self:_track(Backend.text(title or "Section", self.Theme.Accent, 13)),
+		_tabBg = self:_track(Backend.rect(self.Theme.Panel2, true)),
+		_tabLabel = self:_track(Backend.text(title or "Section", self.Theme.Muted, 12)),
+		_tabBounds = { X = 0, Y = 0, W = 0, H = 0 },
 	}, Section)
 	self._sections[#self._sections + 1] = section
+	if not self._activeSection then
+		self._activeSection = section
+	end
 	self._dirty = true
 	return section
+end
+
+function Root:Tab(title)
+	return self:Section(title)
 end
 
 function Root:Layout()
@@ -691,7 +810,7 @@ function Root:Layout()
 	local x = self.Position.X
 	local y = self.Position.Y
 	local width = self.Width
-	local cursor = y + 36
+	local cursor = y + 72
 	local pad = 10
 
 	self._titleBounds.X = x
@@ -725,11 +844,37 @@ function Root:Layout()
 	end)
 
 	if not self.Minimized then
+		if self._activeSection and self._activeSection.Visible == false then
+			self._activeSection = nil
+		end
+		if not self._activeSection then
+			for _, section in ipairs(self._sections) do
+				if section.Visible ~= false then
+					self._activeSection = section
+					break
+				end
+			end
+		end
+
+		local tabCount = math.max(#self._sections, 1)
+		local tabGap = 5
+		local tabW = floor((width - pad * 2 - tabGap * (tabCount - 1)) / tabCount)
+		local tabY = y + 42
+		for index, section in ipairs(self._sections) do
+			local tabX = x + pad + (index - 1) * (tabW + tabGap)
+			section._tabBounds.X = tabX
+			section._tabBounds.Y = tabY
+			section._tabBounds.W = tabW
+			section._tabBounds.H = 22
+			Backend.place(section._tabBg, tabX, tabY, tabW, 22)
+			Backend.textAt(section._tabLabel, tabX + 8, tabY + 4)
+			setVisible(section._tabBg, self.Visible and section.Visible ~= false)
+			setVisible(section._tabLabel, self.Visible and section.Visible ~= false)
+			self:_paintTab(section, section == self._hoveredTab and "hover" or "idle")
+		end
+
 		for _, section in ipairs(self._sections) do
-			if section.Visible ~= false then
-				Backend.textAt(section._header, x + pad, cursor)
-				setVisible(section._header, self.Visible)
-				cursor += 22
+			if section.Visible ~= false and section == self._activeSection then
 				for _, widget in ipairs(section.Widgets) do
 					if widget.Visible ~= false then
 						for _, object in ipairs(widget._objects) do
@@ -741,7 +886,6 @@ function Root:Layout()
 				end
 				cursor += 5
 			else
-				setVisible(section._header, false)
 				for _, widget in ipairs(section.Widgets) do
 					for _, object in ipairs(widget._objects) do
 						setVisible(object, false)
@@ -751,7 +895,8 @@ function Root:Layout()
 		end
 	else
 		for _, section in ipairs(self._sections) do
-			setVisible(section._header, false)
+			setVisible(section._tabBg, false)
+			setVisible(section._tabLabel, false)
 			for _, widget in ipairs(section.Widgets) do
 				for _, object in ipairs(widget._objects) do
 					setVisible(object, false)
