@@ -16,6 +16,7 @@ local MatchaUI = {
 		Pressed = Color3.fromRGB(95, 139, 76),
 		Shadow = Color3.fromRGB(6, 7, 6),
 		Danger = Color3.fromRGB(221, 105, 92),
+		Warning = Color3.fromRGB(220, 175, 83),
 	},
 }
 
@@ -35,6 +36,15 @@ local function vec2(x, y)
 end
 
 local Theme = MatchaUI.Theme
+
+local function normalizeKey(value)
+	local text = tostring(value or "")
+	text = text:gsub("Enum%.KeyCode%.", "")
+	text = text:gsub("Enum%.UserInputType%.", "")
+	text = text:gsub("KeyCode%.", "")
+	text = text:gsub("UserInputType%.", "")
+	return string.lower(text)
+end
 
 local function clearArray(list)
 	for index = #list, 1, -1 do
@@ -266,6 +276,7 @@ function Backend.color(object, color)
 end
 
 local Section = {}
+local Settings = {}
 
 local Root = {}
 Root.__index = Root
@@ -277,19 +288,25 @@ function Root.new(options)
 	self.Position = options.Position or Vector2.new(80, 80)
 	self.Width = options.Width or 320
 	self.Visible = options.Visible ~= false
+	self.Minimized = false
 	self.Theme = options.Theme or Theme
 	self._objects = {}
+	self._chromeObjects = {}
 	self._widgets = {}
 	self._sections = {}
+	self._keybinds = {}
 	self._dirty = true
 	self._height = 0
 	self._hovered = nil
 	self._pressed = nil
+	self._pressedControl = nil
+	self._hoveredControl = nil
 	self._draggingSlider = nil
 	self._draggingWindow = false
 	self._dragOffset = Vector2.new(0, 0)
 	self._alive = true
 	self._titleBounds = { X = 0, Y = 0, W = 0, H = 0 }
+	self._controls = {}
 	self._connections = {}
 	self._guiParent = Backend.createGuiParent()
 	self._mouse = self:_findMouse()
@@ -300,6 +317,13 @@ function Root.new(options)
 	self._accent = self:_track(Backend.rect(self.Theme.Accent, true))
 	self._border = self:_track(Backend.rect(self.Theme.Stroke, false))
 	self._title = self:_track(Backend.text(self.Title, self.Theme.Text, 15))
+	self:_trackChrome(self._shadow)
+	self:_trackChrome(self._background)
+	self:_trackChrome(self._header)
+	self:_trackChrome(self._accent)
+	self:_trackChrome(self._border)
+	self:_trackChrome(self._title)
+	self:_createTitleControls()
 
 	self:_connectInput()
 	self:_startInputLoop()
@@ -310,6 +334,39 @@ end
 function Root:_track(object)
 	self._objects[#self._objects + 1] = object
 	return object
+end
+
+function Root:_trackChrome(object)
+	self._chromeObjects[#self._chromeObjects + 1] = object
+	return object
+end
+
+function Root:_makeControl(name, text, color, callback)
+	local bg = self:_track(Backend.rect(self.Theme.Panel2, true))
+	local label = self:_track(Backend.text(text, color, 13))
+	self:_trackChrome(bg)
+	self:_trackChrome(label)
+
+	local control = {
+		Name = name,
+		Text = text,
+		Callback = callback,
+		BG = bg,
+		Label = label,
+		Color = color,
+		Bounds = { X = 0, Y = 0, W = 0, H = 0 },
+	}
+	self._controls[#self._controls + 1] = control
+	return control
+end
+
+function Root:_createTitleControls()
+	self._minimizeControl = self:_makeControl("Minimize", "-", self.Theme.Warning, function()
+		self:SetMinimized(not self.Minimized)
+	end)
+	self._closeControl = self:_makeControl("Close", "x", self.Theme.Danger, function()
+		self:Close()
+	end)
 end
 
 function Root:_connectInput()
@@ -327,6 +384,7 @@ function Root:_connectInput()
 	if began and began.Connect then
 		self._connections[#self._connections + 1] = began:Connect(function(input, processed)
 			if processed then
+				self:_dispatchKey(input)
 				return
 			end
 			self:_inputBegan(input)
@@ -379,9 +437,58 @@ function Root:_isMouse(input)
 		or inputType == nil
 end
 
+function Root:_keyName(input)
+	if not input then
+		return ""
+	end
+	local keyCode = input.KeyCode
+	if keyCode and tostring(keyCode) ~= "Enum.KeyCode.Unknown" then
+		return normalizeKey(keyCode)
+	end
+	return normalizeKey(input.UserInputType)
+end
+
+function Root:_dispatchKey(input)
+	local key = self:_keyName(input)
+	if key == "" then
+		return false
+	end
+	for _, bind in ipairs(self._keybinds) do
+		if bind.Enabled ~= false and bind.Key == key then
+			bind.Callback(self, input)
+			return true
+		end
+	end
+	return false
+end
+
 function Root:_inTitle(point)
 	local b = self._titleBounds
 	return point.X >= b.X and point.Y >= b.Y and point.X <= b.X + b.W and point.Y <= b.Y + b.H
+end
+
+function Root:_hitControl(point)
+	for index = #self._controls, 1, -1 do
+		local control = self._controls[index]
+		local b = control.Bounds
+		if point.X >= b.X and point.Y >= b.Y and point.X <= b.X + b.W and point.Y <= b.Y + b.H then
+			return control
+		end
+	end
+	return nil
+end
+
+function Root:_paintControl(control, state)
+	if not control then
+		return
+	end
+	local color = self.Theme.Panel2
+	if state == "hover" then
+		color = self.Theme.Hover
+	elseif state == "pressed" then
+		color = self.Theme.Pressed
+	end
+	Backend.color(control.BG, color)
 end
 
 function Root:_startInputLoop()
@@ -417,6 +524,20 @@ function Root:_tickInput()
 		return
 	end
 
+	local control = self:_hitControl(point)
+	if control ~= self._hoveredControl then
+		self:_paintControl(self._hoveredControl, "idle")
+		self._hoveredControl = control
+		self:_paintControl(control, "hover")
+	end
+	if control then
+		if self._hovered and self._hovered._hover then
+			self._hovered:_hover(false)
+		end
+		self._hovered = nil
+		return
+	end
+
 	local hovered = self:_hitTest(point)
 	if hovered ~= self._hovered then
 		if self._hovered and self._hovered._hover then
@@ -448,11 +569,20 @@ function Root:_hitTest(point)
 end
 
 function Root:_inputBegan(input)
+	if self:_dispatchKey(input) then
+		return
+	end
 	if not self.Visible or not self:_isMouse(input) then
 		return
 	end
 	local point = self:_mousePosition(input)
 	if not point then
+		return
+	end
+	local control = self:_hitControl(point)
+	if control then
+		self._pressedControl = control
+		self:_paintControl(control, "pressed")
 		return
 	end
 	if self:_inTitle(point) then
@@ -482,6 +612,20 @@ function Root:_inputChanged(input)
 	elseif self._draggingSlider and self._draggingSlider._drag then
 		self._draggingSlider:_drag(point)
 	else
+		local control = self:_hitControl(point)
+		if control ~= self._hoveredControl then
+			self:_paintControl(self._hoveredControl, "idle")
+			self._hoveredControl = control
+			self:_paintControl(control, "hover")
+		end
+		if control then
+			if self._hovered and self._hovered._hover then
+				self._hovered:_hover(false)
+			end
+			self._hovered = nil
+			return
+		end
+
 		local hovered = self:_hitTest(point)
 		if hovered ~= self._hovered then
 			if self._hovered and self._hovered._hover then
@@ -501,9 +645,19 @@ function Root:_inputEnded(input)
 	end
 	local point = self:_mousePosition(input)
 	local pressed = self._pressed
+	local pressedControl = self._pressedControl
 	self._pressed = nil
+	self._pressedControl = nil
 	self._draggingSlider = nil
 	self._draggingWindow = false
+	if pressedControl then
+		local overControl = point and self:_hitControl(point) == pressedControl
+		self:_paintControl(pressedControl, overControl and "hover" or "idle")
+		if overControl and pressedControl.Callback then
+			pressedControl.Callback()
+		end
+		return
+	end
 	if pressed and pressed._release then
 		pressed:_release(point)
 	end
@@ -552,21 +706,61 @@ function Root:Layout()
 	Backend.place(self._border, x - 1, y - 1, width + 2, 54)
 	Backend.textAt(self._title, x + pad, y + 9)
 
-	for _, section in ipairs(self._sections) do
-		if section.Visible ~= false then
-			Backend.textAt(section._header, x + pad, cursor)
-			cursor += 22
-			for _, widget in ipairs(section.Widgets) do
-				if widget.Visible ~= false then
-					widget:_layout(x + pad, cursor, width - pad * 2)
-					cursor += widget.Height + 6
+	local closeX = x + width - 28
+	local minimizeX = x + width - 54
+	self._minimizeControl.Bounds.X = minimizeX
+	self._minimizeControl.Bounds.Y = y + 7
+	self._minimizeControl.Bounds.W = 20
+	self._minimizeControl.Bounds.H = 20
+	self._closeControl.Bounds.X = closeX
+	self._closeControl.Bounds.Y = y + 7
+	self._closeControl.Bounds.W = 20
+	self._closeControl.Bounds.H = 20
+	Backend.place(self._minimizeControl.BG, minimizeX, y + 7, 20, 20)
+	Backend.textAt(self._minimizeControl.Label, minimizeX + 7, y + 9)
+	Backend.place(self._closeControl.BG, closeX, y + 7, 20, 20)
+	Backend.textAt(self._closeControl.Label, closeX + 7, y + 8)
+	pcall(function()
+		self._minimizeControl.Label.Text = self.Minimized and "+" or "-"
+	end)
+
+	if not self.Minimized then
+		for _, section in ipairs(self._sections) do
+			if section.Visible ~= false then
+				Backend.textAt(section._header, x + pad, cursor)
+				setVisible(section._header, self.Visible)
+				cursor += 22
+				for _, widget in ipairs(section.Widgets) do
+					if widget.Visible ~= false then
+						for _, object in ipairs(widget._objects) do
+							setVisible(object, self.Visible)
+						end
+						widget:_layout(x + pad, cursor, width - pad * 2)
+						cursor += widget.Height + 6
+					end
+				end
+				cursor += 5
+			else
+				setVisible(section._header, false)
+				for _, widget in ipairs(section.Widgets) do
+					for _, object in ipairs(widget._objects) do
+						setVisible(object, false)
+					end
 				end
 			end
-			cursor += 5
+		end
+	else
+		for _, section in ipairs(self._sections) do
+			setVisible(section._header, false)
+			for _, widget in ipairs(section.Widgets) do
+				for _, object in ipairs(widget._objects) do
+					setVisible(object, false)
+				end
+			end
 		end
 	end
 
-	self._height = cursor - y + pad
+	self._height = self.Minimized and 36 or cursor - y + pad
 	Backend.place(self._shadow, x + 5, y + 6, width, self._height)
 	Backend.place(self._background, x, y, width, self._height)
 	Backend.place(self._header, x, y, width, 34)
@@ -579,6 +773,48 @@ function Root:SetVisible(visible)
 	for _, object in ipairs(self._objects) do
 		setVisible(object, self.Visible)
 	end
+	if self.Visible then
+		self._dirty = true
+		self:Layout()
+	end
+end
+
+function Root:ToggleVisible()
+	self:SetVisible(not self.Visible)
+end
+
+function Root:SetMinimized(minimized)
+	self.Minimized = minimized == true
+	self._pressed = nil
+	self._draggingSlider = nil
+	self._dirty = true
+	self:Layout()
+end
+
+function Root:ToggleMinimized()
+	self:SetMinimized(not self.Minimized)
+end
+
+function Root:Close()
+	self:SetVisible(false)
+end
+
+function Root:BindKey(key, callback)
+	local bind = {
+		Key = normalizeKey(key),
+		Callback = callback,
+		Enabled = true,
+	}
+	self._keybinds[#self._keybinds + 1] = bind
+	return {
+		Disconnect = function()
+			bind.Enabled = false
+		end,
+	}
+end
+
+function Root:Settings(options)
+	return Settings.new(self, options)
 end
 
 function Root:Destroy()
@@ -597,6 +833,200 @@ function Root:Destroy()
 	clearArray(self._objects)
 	clearArray(self._widgets)
 	clearArray(self._sections)
+end
+
+Settings.__index = Settings
+
+function Settings.new(root, options)
+	options = options or {}
+	local self = setmetatable({}, Settings)
+	self.Root = root
+	self.ToggleKey = nil
+	self.MinimizeKey = nil
+	self.BeaconEnabled = false
+	self._toggleBind = nil
+	self._minimizeBind = nil
+	self._beaconObjects = nil
+	self._beaconAlive = false
+	self._section = nil
+	self._defaultBeacon = options.Beacon ~= false
+
+	if options.Panel ~= false then
+		self:_createPanel()
+	end
+
+	if options.ToggleKey ~= false then
+		self:BindToggleKey(options.ToggleKey or "F1")
+	end
+
+	if options.MinimizeKey then
+		self:BindMinimizeKey(options.MinimizeKey)
+	end
+
+	if options.Beacon ~= false then
+		self:EnableBeacon(true)
+	end
+
+	return self
+end
+
+function Settings:_createPanel()
+	local section = self.Root:Section("UI")
+	self._section = section
+	self._keyLabel = section:Label("Toggle key: F1")
+	section:Button("Hide UI", function()
+		self.Root:SetVisible(false)
+	end)
+	section:Button("Minimize", function()
+		self.Root:ToggleMinimized()
+	end)
+	section:Toggle("Cursor beacon", self._defaultBeacon, function(enabled)
+		self:EnableBeacon(enabled)
+	end)
+end
+
+function Settings:_setKeyLabel()
+	if self._keyLabel then
+		self._keyLabel:Set("Toggle key: " .. tostring(self.ToggleKey or "none"))
+	end
+end
+
+function Settings:BindToggleKey(key)
+	if self._toggleBind then
+		self._toggleBind.Disconnect()
+	end
+	self.ToggleKey = tostring(key)
+	self._toggleBind = self.Root:BindKey(key, function(root)
+		root:ToggleVisible()
+		self:Pulse()
+	end)
+	self:_setKeyLabel()
+	return self
+end
+
+function Settings:BindMinimizeKey(key)
+	if self._minimizeBind then
+		self._minimizeBind.Disconnect()
+	end
+	self.MinimizeKey = tostring(key)
+	self._minimizeBind = self.Root:BindKey(key, function(root)
+		if root.Visible then
+			root:ToggleMinimized()
+			self:Pulse()
+		end
+	end)
+	return self
+end
+
+function Settings:_ensureBeacon()
+	if self._beaconObjects then
+		return
+	end
+
+	self._beaconObjects = {
+		self.Root:_track(Backend.rect(self.Root.Theme.Accent, true)),
+		self.Root:_track(Backend.rect(self.Root.Theme.Text, true)),
+		self.Root:_track(Backend.rect(self.Root.Theme.Accent, true)),
+	}
+
+	for _, object in ipairs(self._beaconObjects) do
+		setVisible(object, false)
+	end
+end
+
+function Settings:EnableBeacon(enabled)
+	self.BeaconEnabled = enabled == true
+	self:_ensureBeacon()
+
+	if not self.BeaconEnabled then
+		for _, object in ipairs(self._beaconObjects) do
+			setVisible(object, false)
+		end
+		return self
+	end
+
+	if not self._beaconAlive then
+		self._beaconAlive = true
+		makeThread(function()
+			while self._beaconAlive and self.Root._alive do
+				self:_tickBeacon()
+				if not sleep(1 / 24) then
+					break
+				end
+			end
+		end)
+	end
+
+	return self
+end
+
+function Settings:_tickBeacon()
+	if not self.BeaconEnabled or not self.Root.Visible then
+		for _, object in ipairs(self._beaconObjects) do
+			setVisible(object, false)
+		end
+		return
+	end
+
+	local point = self.Root:_mousePosition(nil)
+	if not point then
+		return
+	end
+
+	local bounds = nil
+	if self.Root._hovered then
+		bounds = self.Root._hovered._bounds
+	elseif self.Root._hoveredControl then
+		bounds = self.Root._hoveredControl.Bounds
+	end
+
+	local x = point.X + 12
+	local y = point.Y + 14
+	if bounds then
+		x = bounds.X + bounds.W + 6
+		y = bounds.Y + 4
+	end
+
+	for index, object in ipairs(self._beaconObjects) do
+		setVisible(object, true)
+		Backend.place(object, x, y + (index - 1) * 6, index == 2 and 10 or 6, 3)
+	end
+end
+
+function Settings:Pulse()
+	self:_ensureBeacon()
+	makeThread(function()
+		for step = 1, 6 do
+			if not self.Root._alive then
+				return
+			end
+			local x = self.Root.Position.X + self.Root.Width - 82 + step * 3
+			local y = self.Root.Position.Y + 39
+			for index, object in ipairs(self._beaconObjects) do
+				setVisible(object, self.Root.Visible)
+				Backend.place(object, x + (index - 1) * 12, y, 9, 3)
+			end
+			if not sleep(0.035) then
+				break
+			end
+		end
+	end)
+end
+
+function Settings:Destroy()
+	if self._toggleBind then
+		self._toggleBind.Disconnect()
+	end
+	if self._minimizeBind then
+		self._minimizeBind.Disconnect()
+	end
+	self._beaconAlive = false
+	if self._beaconObjects then
+		for _, object in ipairs(self._beaconObjects) do
+			removeObject(object)
+		end
+		clearArray(self._beaconObjects)
+	end
 end
 
 Section.__index = Section
@@ -864,6 +1294,10 @@ end
 
 function MatchaUI.CreateWindow(options)
 	return Root.new(options)
+end
+
+function MatchaUI.Settings(window, options)
+	return Settings.new(window, options)
 end
 
 if typeOf(_G) == "table" then
