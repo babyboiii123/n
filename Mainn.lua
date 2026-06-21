@@ -5,13 +5,16 @@
 local MatchaUI = {
 	Version = "0.1.0",
 	Theme = {
-		Background = Color3.fromRGB(24, 25, 23),
-		Panel = Color3.fromRGB(33, 35, 32),
-		Panel2 = Color3.fromRGB(43, 47, 41),
+		Background = Color3.fromRGB(18, 20, 18),
+		Panel = Color3.fromRGB(29, 32, 29),
+		Panel2 = Color3.fromRGB(39, 44, 38),
 		Accent = Color3.fromRGB(122, 184, 94),
 		Text = Color3.fromRGB(235, 239, 231),
-		Muted = Color3.fromRGB(160, 169, 153),
-		Stroke = Color3.fromRGB(70, 76, 66),
+		Muted = Color3.fromRGB(166, 176, 158),
+		Stroke = Color3.fromRGB(76, 86, 70),
+		Hover = Color3.fromRGB(50, 58, 47),
+		Pressed = Color3.fromRGB(95, 139, 76),
+		Shadow = Color3.fromRGB(6, 7, 6),
 		Danger = Color3.fromRGB(221, 105, 92),
 	},
 }
@@ -32,6 +35,31 @@ local function vec2(x, y)
 end
 
 local Theme = MatchaUI.Theme
+
+local function clearArray(list)
+	for index = #list, 1, -1 do
+		list[index] = nil
+	end
+end
+
+local function makeThread(callback)
+	if typeOf(task) == "table" and typeOf(task.spawn) == "function" then
+		task.spawn(callback)
+	else
+		coroutine.wrap(callback)()
+	end
+end
+
+local function sleep(seconds)
+	if typeOf(task) == "table" and typeOf(task.wait) == "function" then
+		task.wait(seconds)
+		return true
+	elseif typeOf(wait) == "function" then
+		wait(seconds)
+		return true
+	end
+	return false
+end
 
 local function isDrawingReady()
 	return typeOf(Drawing) == "table" and typeOf(Drawing.new) == "function"
@@ -258,14 +286,23 @@ function Root.new(options)
 	self._hovered = nil
 	self._pressed = nil
 	self._draggingSlider = nil
+	self._draggingWindow = false
+	self._dragOffset = Vector2.new(0, 0)
+	self._alive = true
+	self._titleBounds = { X = 0, Y = 0, W = 0, H = 0 }
 	self._connections = {}
 	self._guiParent = Backend.createGuiParent()
+	self._mouse = self:_findMouse()
 
+	self._shadow = self:_track(Backend.rect(self.Theme.Shadow, true))
 	self._background = self:_track(Backend.rect(self.Theme.Background, true))
+	self._header = self:_track(Backend.rect(self.Theme.Panel, true))
+	self._accent = self:_track(Backend.rect(self.Theme.Accent, true))
 	self._border = self:_track(Backend.rect(self.Theme.Stroke, false))
 	self._title = self:_track(Backend.text(self.Title, self.Theme.Text, 15))
 
 	self:_connectInput()
+	self:_startInputLoop()
 	self:Layout()
 	return self
 end
@@ -307,6 +344,18 @@ function Root:_connectInput()
 	end
 end
 
+function Root:_findMouse()
+	local player = protect(function()
+		return game:GetService("Players").LocalPlayer
+	end)
+	if player and player.GetMouse then
+		return protect(function()
+			return player:GetMouse()
+		end)
+	end
+	return nil
+end
+
 function Root:_mousePosition(input)
 	local position = input and input.Position
 	if typeOf(position) == "Vector3" then
@@ -314,14 +363,70 @@ function Root:_mousePosition(input)
 	elseif typeOf(position) == "Vector2" then
 		return position
 	end
+	if self._mouse and self._mouse.X and self._mouse.Y then
+		return Vector2.new(self._mouse.X, self._mouse.Y)
+	end
 	return nil
 end
 
 function Root:_isMouse(input)
 	local inputType = input and input.UserInputType
+	local keyCode = input and input.KeyCode
 	return tostring(inputType) == "Enum.UserInputType.MouseButton1"
 		or tostring(inputType) == "MouseButton1"
+		or tostring(keyCode) == "Enum.UserInputType.MouseButton1"
+		or tostring(keyCode) == "MouseButton1"
 		or inputType == nil
+end
+
+function Root:_inTitle(point)
+	local b = self._titleBounds
+	return point.X >= b.X and point.Y >= b.Y and point.X <= b.X + b.W and point.Y <= b.Y + b.H
+end
+
+function Root:_startInputLoop()
+	makeThread(function()
+		while self._alive do
+			self:_tickInput()
+			if not sleep(1 / 30) then
+				break
+			end
+		end
+	end)
+end
+
+function Root:_tickInput()
+	if not self.Visible then
+		return
+	end
+
+	local point = self:_mousePosition(nil)
+	if not point then
+		return
+	end
+
+	if self._draggingWindow then
+		self.Position = vec2(point.X - self._dragOffset.X, point.Y - self._dragOffset.Y)
+		self._dirty = true
+		self:Layout()
+		return
+	end
+
+	if self._draggingSlider and self._draggingSlider._drag then
+		self._draggingSlider:_drag(point)
+		return
+	end
+
+	local hovered = self:_hitTest(point)
+	if hovered ~= self._hovered then
+		if self._hovered and self._hovered._hover then
+			self._hovered:_hover(false)
+		end
+		self._hovered = hovered
+		if hovered and hovered._hover then
+			hovered:_hover(true)
+		end
+	end
 end
 
 function Root:_hitTest(point)
@@ -350,6 +455,11 @@ function Root:_inputBegan(input)
 	if not point then
 		return
 	end
+	if self:_inTitle(point) then
+		self._draggingWindow = true
+		self._dragOffset = Vector2.new(point.X - self.Position.X, point.Y - self.Position.Y)
+		return
+	end
 	local widget = self:_hitTest(point)
 	self._pressed = widget
 	if widget and widget._press then
@@ -365,7 +475,11 @@ function Root:_inputChanged(input)
 	if not point then
 		return
 	end
-	if self._draggingSlider and self._draggingSlider._drag then
+	if self._draggingWindow then
+		self.Position = vec2(point.X - self._dragOffset.X, point.Y - self._dragOffset.Y)
+		self._dirty = true
+		self:Layout()
+	elseif self._draggingSlider and self._draggingSlider._drag then
 		self._draggingSlider:_drag(point)
 	else
 		local hovered = self:_hitTest(point)
@@ -389,6 +503,7 @@ function Root:_inputEnded(input)
 	local pressed = self._pressed
 	self._pressed = nil
 	self._draggingSlider = nil
+	self._draggingWindow = false
 	if pressed and pressed._release then
 		pressed:_release(point)
 	end
@@ -425,8 +540,16 @@ function Root:Layout()
 	local cursor = y + 36
 	local pad = 10
 
-	Backend.place(self._background, x, y, width, 44, 0)
-	Backend.place(self._border, x - 1, y - 1, width + 2, 46, 0)
+	self._titleBounds.X = x
+	self._titleBounds.Y = y
+	self._titleBounds.W = width
+	self._titleBounds.H = 34
+
+	Backend.place(self._shadow, x + 5, y + 6, width, math.max(self._height, 52))
+	Backend.place(self._background, x, y, width, 52)
+	Backend.place(self._header, x, y, width, 34)
+	Backend.place(self._accent, x, y + 34, width, 2)
+	Backend.place(self._border, x - 1, y - 1, width + 2, 54)
 	Backend.textAt(self._title, x + pad, y + 9)
 
 	for _, section in ipairs(self._sections) do
@@ -444,7 +567,10 @@ function Root:Layout()
 	end
 
 	self._height = cursor - y + pad
+	Backend.place(self._shadow, x + 5, y + 6, width, self._height)
 	Backend.place(self._background, x, y, width, self._height)
+	Backend.place(self._header, x, y, width, 34)
+	Backend.place(self._accent, x, y + 34, width, 2)
 	Backend.place(self._border, x - 1, y - 1, width + 2, self._height + 2)
 end
 
@@ -456,6 +582,7 @@ function Root:SetVisible(visible)
 end
 
 function Root:Destroy()
+	self._alive = false
 	for _, connection in ipairs(self._connections) do
 		if connection and connection.Disconnect then
 			pcall(function()
@@ -467,9 +594,9 @@ function Root:Destroy()
 		removeObject(object)
 	end
 	removeObject(self._guiParent)
-	table.clear(self._objects)
-	table.clear(self._widgets)
-	table.clear(self._sections)
+	clearArray(self._objects)
+	clearArray(self._widgets)
+	clearArray(self._sections)
 end
 
 Section.__index = Section
@@ -498,7 +625,7 @@ function Widget:Destroy()
 	for _, object in ipairs(self._objects) do
 		removeObject(object)
 	end
-	table.clear(self._objects)
+	clearArray(self._objects)
 	self.Root._dirty = true
 	self.Root:Layout()
 end
@@ -545,27 +672,37 @@ function Section:Button(text, callback)
 	local widget = baseWidget(self, 28, true)
 	widget.Text = text or "Button"
 	widget.Callback = callback
+	widget._down = false
+	widget._isHovering = false
 	widget._bg = widget.Root:_track(Backend.rect(widget.Root.Theme.Panel2, true))
+	widget._edge = widget.Root:_track(Backend.rect(widget.Root.Theme.Accent, true))
 	widget._label = widget.Root:_track(Backend.text(widget.Text, widget.Root.Theme.Text, 13))
 	widget._objects[#widget._objects + 1] = widget._bg
+	widget._objects[#widget._objects + 1] = widget._edge
 	widget._objects[#widget._objects + 1] = widget._label
 
 	function widget:_layout(x, y, w)
 		self:_setBounds(x, y, w, self.Height)
 		Backend.place(self._bg, x, y, w, self.Height)
-		Backend.textAt(self._label, x + 8, y + 6)
+		Backend.place(self._edge, x, y, 3, self.Height)
+		Backend.textAt(self._label, x + 10, y + 6)
 	end
 
 	function widget:_hover(active)
-		Backend.color(self._bg, active and self.Root.Theme.Stroke or self.Root.Theme.Panel2)
+		self._isHovering = active == true
+		if not self._down then
+			Backend.color(self._bg, active and self.Root.Theme.Hover or self.Root.Theme.Panel2)
+		end
 	end
 
 	function widget:_press()
-		Backend.color(self._bg, self.Root.Theme.Accent)
+		self._down = true
+		Backend.color(self._bg, self.Root.Theme.Pressed)
 	end
 
 	function widget:_release(point)
-		Backend.color(self._bg, self.Root.Theme.Panel2)
+		self._down = false
+		Backend.color(self._bg, self._isHovering and self.Root.Theme.Hover or self.Root.Theme.Panel2)
 		if not point or self.Root:_hitTest(point) == self then
 			if self.Callback then
 				self.Callback()
@@ -589,33 +726,51 @@ function Section:Toggle(text, defaultValue, callback)
 	widget.Text = text or "Toggle"
 	widget.Value = defaultValue == true
 	widget.Callback = callback
+	widget._down = false
+	widget._isHovering = false
 	widget._bg = widget.Root:_track(Backend.rect(widget.Root.Theme.Panel2, true))
 	widget._box = widget.Root:_track(Backend.rect(widget.Value and widget.Root.Theme.Accent or widget.Root.Theme.Panel, true))
+	widget._mark = widget.Root:_track(Backend.text(widget.Value and "on" or "", widget.Root.Theme.Text, 11))
 	widget._label = widget.Root:_track(Backend.text(widget.Text, widget.Root.Theme.Text, 13))
 	widget._objects[#widget._objects + 1] = widget._bg
 	widget._objects[#widget._objects + 1] = widget._box
+	widget._objects[#widget._objects + 1] = widget._mark
 	widget._objects[#widget._objects + 1] = widget._label
 
 	function widget:_layout(x, y, w)
 		self:_setBounds(x, y, w, self.Height)
 		Backend.place(self._bg, x, y, w, self.Height)
-		Backend.place(self._box, x + 7, y + 7, 14, 14)
-		Backend.textAt(self._label, x + 29, y + 6)
+		Backend.place(self._box, x + 8, y + 7, 28, 14)
+		Backend.textAt(self._mark, x + 14, y + 7)
+		Backend.textAt(self._label, x + 46, y + 6)
 	end
 
 	function widget:_hover(active)
-		Backend.color(self._bg, active and self.Root.Theme.Stroke or self.Root.Theme.Panel2)
+		self._isHovering = active == true
+		if not self._down then
+			Backend.color(self._bg, active and self.Root.Theme.Hover or self.Root.Theme.Panel2)
+		end
+	end
+
+	function widget:_press()
+		self._down = true
+		Backend.color(self._bg, self.Root.Theme.Pressed)
 	end
 
 	function widget:Set(value, silent)
 		self.Value = value == true
 		Backend.color(self._box, self.Value and self.Root.Theme.Accent or self.Root.Theme.Panel)
+		pcall(function()
+			self._mark.Text = self.Value and "on" or ""
+		end)
 		if not silent and self.Callback then
 			self.Callback(self.Value)
 		end
 	end
 
 	function widget:_release(point)
+		self._down = false
+		Backend.color(self._bg, self._isHovering and self.Root.Theme.Hover or self.Root.Theme.Panel2)
 		if not point or self.Root:_hitTest(point) == self then
 			self:Set(not self.Value)
 		end
@@ -636,13 +791,16 @@ function Section:Slider(text, minValue, maxValue, defaultValue, callback)
 	widget.Max = maxValue
 	widget.Value = clamp(defaultValue, minValue, maxValue)
 	widget.Callback = callback
+	widget._isHovering = false
 	widget._bg = widget.Root:_track(Backend.rect(widget.Root.Theme.Panel2, true))
 	widget._bar = widget.Root:_track(Backend.rect(widget.Root.Theme.Panel, true))
 	widget._fill = widget.Root:_track(Backend.rect(widget.Root.Theme.Accent, true))
+	widget._knob = widget.Root:_track(Backend.rect(widget.Root.Theme.Text, true))
 	widget._label = widget.Root:_track(Backend.text("", widget.Root.Theme.Text, 13))
 	widget._objects[#widget._objects + 1] = widget._bg
 	widget._objects[#widget._objects + 1] = widget._bar
 	widget._objects[#widget._objects + 1] = widget._fill
+	widget._objects[#widget._objects + 1] = widget._knob
 	widget._objects[#widget._objects + 1] = widget._label
 
 	function widget:_ratio()
@@ -659,14 +817,24 @@ function Section:Slider(text, minValue, maxValue, defaultValue, callback)
 		Backend.place(self._bg, x, y, w, self.Height)
 		Backend.place(self._bar, x + 8, y + 22, w - 16, 5)
 		Backend.place(self._fill, x + 8, y + 22, floor((w - 16) * ratio), 5)
+		Backend.place(self._knob, x + 6 + floor((w - 16) * ratio), y + 19, 5, 11)
 		Backend.textAt(self._label, x + 8, y + 5)
 		pcall(function()
 			self._label.Text = self.Text .. ": " .. tostring(self.Value)
 		end)
 	end
 
+	function widget:_hover(active)
+		self._isHovering = active == true
+		Backend.color(self._bg, active and self.Root.Theme.Hover or self.Root.Theme.Panel2)
+	end
+
 	function widget:Set(value, silent)
-		self.Value = clamp(value, self.Min, self.Max)
+		local nextValue = clamp(value, self.Min, self.Max)
+		if nextValue == self.Value then
+			return
+		end
+		self.Value = nextValue
 		self.Root._dirty = true
 		self.Root:Layout()
 		if not silent and self.Callback then
