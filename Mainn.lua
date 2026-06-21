@@ -311,6 +311,7 @@ function Root.new(options)
 	self._sections = {}
 	self._keybinds = {}
 	self._activeSection = nil
+	self._settingsSection = nil
 	self._dirty = true
 	self._height = 0
 	self._hovered = nil
@@ -779,6 +780,19 @@ function Root:AddWidget(widget)
 	return widget
 end
 
+function Root:_reorderSections()
+	if not self._settingsSection then
+		return
+	end
+	for index, section in ipairs(self._sections) do
+		if section == self._settingsSection then
+			table.remove(self._sections, index)
+			break
+		end
+	end
+	self._sections[#self._sections + 1] = self._settingsSection
+end
+
 function Root:Section(title)
 	local section = setmetatable({
 		Root = self,
@@ -790,9 +804,17 @@ function Root:Section(title)
 		_tabBounds = { X = 0, Y = 0, W = 0, H = 0 },
 	}, Section)
 	self._sections[#self._sections + 1] = section
-	if not self._activeSection then
+
+	-- Keep the auto-generated settings/"UI" tab pinned to the end of the tab
+	-- strip, and hand the active tab over to the first real section so the
+	-- settings tab doesn't "steal" first place just because it was created
+	-- first (e.g. when Root:Settings() is called before the caller's own
+	-- Root:Section() calls).
+	if not self._activeSection or self._activeSection == self._settingsSection then
 		self._activeSection = section
 	end
+	self:_reorderSections()
+
 	self._dirty = true
 	return section
 end
@@ -988,13 +1010,9 @@ function Settings.new(root, options)
 	self.Root = root
 	self.ToggleKey = nil
 	self.MinimizeKey = nil
-	self.BeaconEnabled = false
 	self._toggleBind = nil
 	self._minimizeBind = nil
-	self._beaconObjects = nil
-	self._beaconAlive = false
 	self._section = nil
-	self._defaultBeacon = options.Beacon ~= false
 
 	if options.Panel ~= false then
 		self:_createPanel()
@@ -1008,25 +1026,21 @@ function Settings.new(root, options)
 		self:BindMinimizeKey(options.MinimizeKey)
 	end
 
-	if options.Beacon ~= false then
-		self:EnableBeacon(true)
-	end
-
 	return self
 end
 
 function Settings:_createPanel()
 	local section = self.Root:Section("UI")
 	self._section = section
+	self.Root._settingsSection = section
+	self.Root:_reorderSections()
+
 	self._keyLabel = section:Label("Toggle key: F1")
 	section:Button("Hide UI", function()
 		self.Root:SetVisible(false)
 	end)
 	section:Button("Minimize", function()
 		self.Root:ToggleMinimized()
-	end)
-	section:Toggle("Cursor beacon", self._defaultBeacon, function(enabled)
-		self:EnableBeacon(enabled)
 	end)
 end
 
@@ -1043,7 +1057,6 @@ function Settings:BindToggleKey(key)
 	self.ToggleKey = tostring(key)
 	self._toggleBind = self.Root:BindKey(key, function(root)
 		root:ToggleVisible()
-		self:Pulse()
 	end)
 	self:_setKeyLabel()
 	return self
@@ -1057,105 +1070,9 @@ function Settings:BindMinimizeKey(key)
 	self._minimizeBind = self.Root:BindKey(key, function(root)
 		if root.Visible then
 			root:ToggleMinimized()
-			self:Pulse()
 		end
 	end)
 	return self
-end
-
-function Settings:_ensureBeacon()
-	if self._beaconObjects then
-		return
-	end
-
-	self._beaconObjects = {
-		self.Root:_track(Backend.rect(self.Root.Theme.Accent, true)),
-		self.Root:_track(Backend.rect(self.Root.Theme.Text, true)),
-		self.Root:_track(Backend.rect(self.Root.Theme.Accent, true)),
-	}
-
-	for _, object in ipairs(self._beaconObjects) do
-		setVisible(object, false)
-	end
-end
-
-function Settings:EnableBeacon(enabled)
-	self.BeaconEnabled = enabled == true
-	self:_ensureBeacon()
-
-	if not self.BeaconEnabled then
-		for _, object in ipairs(self._beaconObjects) do
-			setVisible(object, false)
-		end
-		return self
-	end
-
-	if not self._beaconAlive then
-		self._beaconAlive = true
-		makeThread(function()
-			while self._beaconAlive and self.Root._alive do
-				self:_tickBeacon()
-				if not sleep(1 / 24) then
-					break
-				end
-			end
-		end)
-	end
-
-	return self
-end
-
-function Settings:_tickBeacon()
-	if not self.BeaconEnabled or not self.Root.Visible then
-		for _, object in ipairs(self._beaconObjects) do
-			setVisible(object, false)
-		end
-		return
-	end
-
-	local point = self.Root:_mousePosition(nil)
-	if not point then
-		return
-	end
-
-	local bounds = nil
-	if self.Root._hovered then
-		bounds = self.Root._hovered._bounds
-	elseif self.Root._hoveredControl then
-		bounds = self.Root._hoveredControl.Bounds
-	end
-
-	local x = point.X + 12
-	local y = point.Y + 14
-	if bounds then
-		x = bounds.X + bounds.W + 6
-		y = bounds.Y + 4
-	end
-
-	for index, object in ipairs(self._beaconObjects) do
-		setVisible(object, true)
-		Backend.place(object, x, y + (index - 1) * 6, index == 2 and 10 or 6, 3)
-	end
-end
-
-function Settings:Pulse()
-	self:_ensureBeacon()
-	makeThread(function()
-		for step = 1, 6 do
-			if not self.Root._alive then
-				return
-			end
-			local x = self.Root.Position.X + self.Root.Width - 82 + step * 3
-			local y = self.Root.Position.Y + 39
-			for index, object in ipairs(self._beaconObjects) do
-				setVisible(object, self.Root.Visible)
-				Backend.place(object, x + (index - 1) * 12, y, 9, 3)
-			end
-			if not sleep(0.035) then
-				break
-			end
-		end
-	end)
 end
 
 function Settings:Destroy()
@@ -1164,13 +1081,6 @@ function Settings:Destroy()
 	end
 	if self._minimizeBind then
 		self._minimizeBind.Disconnect()
-	end
-	self._beaconAlive = false
-	if self._beaconObjects then
-		for _, object in ipairs(self._beaconObjects) do
-			removeObject(object)
-		end
-		clearArray(self._beaconObjects)
 	end
 end
 
